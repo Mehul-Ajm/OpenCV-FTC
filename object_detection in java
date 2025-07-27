@@ -1,0 +1,231 @@
+import org.opencv.core.*;
+import org.opencv.imgproc.Imgproc;
+import org.opencv.videoio.VideoCapture;
+
+import javax.swing.*;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.util.*;
+
+public class AdvancedColorDetector {
+
+    // Load the OpenCV native library
+    static {
+        try {
+            System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
+        } catch (UnsatisfiedLinkError e) {
+            System.err.println("Native code library failed to load.\n" +
+                    "Ensure you have configured the -Djava.library.path VM argument " +
+                    "to point to the directory containing the OpenCV native library.");
+            System.exit(1);
+        }
+    }
+
+    public static void main(String[] args) {
+        // 1. Get user input for the target color
+        String targetColor = getTargetColor();
+        System.out.println("Looking for '" + targetColor + "' objects. Press 'q' in the window to quit (or close it).");
+
+        // 2. Setup GUI Window
+        JFrame window = new JFrame("Advanced Color and Object Detection");
+        window.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        window.setSize(1280, 720);
+        JLabel imageLabel = new JLabel();
+        window.add(imageLabel);
+        window.setVisible(true);
+
+        // 3. Setup Camera
+        VideoCapture camera = new VideoCapture(0);
+        if (!camera.isOpened()) {
+            System.err.println("Error: Camera not found or could not be opened.");
+            return;
+        }
+
+        Mat frame = new Mat();
+
+        // 4. Main Application Loop
+        while (window.isShowing()) {
+            if (camera.read(frame)) {
+                // Detect all configured colors
+                Map<String, List<MatOfPoint>> allDetections = detectAllColors(frame);
+
+                // Check if any non-target colors were found
+                boolean otherColorFound = false;
+                for (Map.Entry<String, List<MatOfPoint>> entry : allDetections.entrySet()) {
+                    if (!entry.getKey().equals(targetColor) && !entry.getValue().isEmpty()) {
+                        otherColorFound = true;
+                        break;
+                    }
+                }
+
+                // Display warning if other colors are present
+                if (otherColorFound) {
+                    Imgproc.putText(frame, "Don't pick it up!", new Point(50, 50),
+                            Imgproc.FONT_HERSHEY_TRIPLEX, 1.5, new Scalar(0, 0, 255), 3);
+                }
+
+                // Draw info for the target color objects
+                List<MatOfPoint> targetContours = allDetections.get(targetColor);
+                if (targetContours != null) {
+                    for (MatOfPoint contour : targetContours) {
+                        drawDetectionInfo(frame, contour, targetColor);
+                    }
+                }
+
+                // Convert Mat to BufferedImage and display
+                imageLabel.setIcon(new ImageIcon(matToBufferedImage(frame)));
+                window.repaint();
+            }
+        }
+
+        // 5. Cleanup
+        camera.release();
+        System.exit(0);
+    }
+
+    /**
+     * Prompts the user via the console to enter the color they want to detect.
+     * @return The chosen color as a string ("red" or "blue").
+     */
+    private static String getTargetColor() {
+        Scanner scanner = new Scanner(System.in);
+        while (true) {
+            System.out.print("Enter the color to detect ('red' or 'blue'): ");
+            String colorInput = scanner.nextLine().toLowerCase().trim();
+            if (colorInput.equals("red") || colorInput.equals("blue")) {
+                scanner.close();
+                return colorInput;
+            } else {
+                System.out.println("Invalid input. Please enter 'red' or 'blue'.");
+            }
+        }
+    }
+
+    /**
+     * Detects all configured colors in a single frame.
+     * @param frame The input frame from the camera.
+     * @return A map where keys are color names and values are lists of contours found.
+     */
+    private static Map<String, List<MatOfPoint>> detectAllColors(Mat frame) {
+        Mat hsvImage = new Mat();
+        Imgproc.cvtColor(frame, hsvImage, Imgproc.COLOR_BGR2HSV);
+
+        Map<String, List<MatOfPoint>> detectedObjects = new HashMap<>();
+        detectedObjects.put("red", new ArrayList<>());
+        detectedObjects.put("blue", new ArrayList<>());
+
+        // Define color ranges
+        Scalar lowerBlue = new Scalar(100, 150, 50);
+        Scalar upperBlue = new Scalar(140, 255, 255);
+        Scalar lowerRed1 = new Scalar(0, 120, 70);
+        Scalar upperRed1 = new Scalar(10, 255, 255);
+        Scalar lowerRed2 = new Scalar(170, 120, 70);
+        Scalar upperRed2 = new Scalar(180, 255, 255);
+
+        // Process Blue
+        Mat blueMask = new Mat();
+        Core.inRange(hsvImage, lowerBlue, upperBlue, blueMask);
+        detectedObjects.put("blue", findAndCleanContours(blueMask));
+
+        // Process Red (requires two masks)
+        Mat redMask1 = new Mat();
+        Mat redMask2 = new Mat();
+        Core.inRange(hsvImage, lowerRed1, upperRed1, redMask1);
+        Core.inRange(hsvImage, lowerRed2, upperRed2, redMask2);
+        Mat combinedRedMask = new Mat();
+        Core.bitwise_or(redMask1, redMask2, combinedRedMask);
+        detectedObjects.put("red", findAndCleanContours(combinedRedMask));
+        
+        // Release intermediate mats
+        hsvImage.release();
+        blueMask.release();
+        redMask1.release();
+        redMask2.release();
+        combinedRedMask.release();
+
+        return detectedObjects;
+    }
+
+    /**
+     * Cleans a binary mask and finds contours above a certain area.
+     * @param mask The binary mask to process.
+     * @return A list of contours.
+     */
+    private static List<MatOfPoint> findAndCleanContours(Mat mask) {
+        Mat kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(7, 7));
+        Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel);
+        Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel);
+        kernel.release();
+
+        List<MatOfPoint> contours = new ArrayList<>();
+        Mat hierarchy = new Mat();
+        Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_TREE, Imgproc.CHAIN_APPROX_SIMPLE);
+        hierarchy.release();
+
+        List<MatOfPoint> largeContours = new ArrayList<>();
+        for (MatOfPoint contour : contours) {
+            if (Imgproc.contourArea(contour) > 500) {
+                largeContours.add(contour);
+            }
+        }
+        return largeContours;
+    }
+
+    /**
+     * Draws the bounding box and info for a single detected object.
+     * @param frame The frame to draw on.
+     * @param contour The contour of the detected object.
+     * @param colorName The name of the color detected.
+     */
+    private static void drawDetectionInfo(Mat frame, MatOfPoint contour, String colorName) {
+        Scalar boxColor = colorName.equals("red") ? new Scalar(0, 0, 255) : new Scalar(255, 200, 0);
+        double frameHeight = frame.size().height;
+
+        RotatedRect rect = Imgproc.minAreaRect(new MatOfPoint2f(contour.toArray()));
+        Point center = rect.center;
+        double width = rect.size.width;
+        double height = rect.size.height;
+        double angle = rect.angle;
+
+        // Elevation Calculation (Y=0 is top, so we invert)
+        int elevationPercent = (int) ((1 - (center.y / frameHeight)) * 100);
+
+        // Draw the rotated rectangle
+        MatOfPoint boxPoints = new MatOfPoint();
+        Imgproc.boxPoints(rect, boxPoints);
+        Imgproc.drawContours(frame, Collections.singletonList(boxPoints), 0, boxColor, 2);
+
+        // Normalize angle and dimensions
+        if (width < height) {
+            angle += 90;
+            double temp = width;
+            width = height;
+            height = temp;
+        }
+        if (angle > 45) {
+            angle -= 90;
+        }
+
+        String dimText = String.format("W: %.0f H: %.0f", width, height);
+        String angleText = String.format("Angle: %.0f deg", angle);
+        String elevationText = "Elevation: " + elevationPercent + "%";
+
+        // Display the text
+        Point textOrigin = new Point(boxPoints.get(1, 0)[0], boxPoints.get(1, 0)[1]); // Use a corner for consistent placement
+        Imgproc.putText(frame, dimText, new Point(textOrigin.x, textOrigin.y - 35), Imgproc.FONT_HERSHEY_SIMPLEX, 0.6, new Scalar(255, 255, 255), 2);
+        Imgproc.putText(frame, angleText, new Point(textOrigin.x, textOrigin.y - 10), Imgproc.FONT_HERSHEY_SIMPLEX, 0.6, new Scalar(255, 255, 255), 2);
+        Imgproc.putText(frame, elevationText, new Point(textOrigin.x, textOrigin.y + 15), Imgproc.FONT_HERSHEY_SIMPLEX, 0.6, new Scalar(255, 255, 255), 2);
+    }
+
+    /**
+     * Converts an OpenCV Mat object to a Java AWT BufferedImage.
+     * @param mat The Mat object to convert.
+     * @return The resulting BufferedImage.
+     */
+    public static BufferedImage matToBufferedImage(Mat mat) {
+        int type = (mat.channels() > 1) ? BufferedImage.TYPE_3BYTE_BGR : BufferedImage.TYPE_BYTE_GRAY;
+        BufferedImage image = new BufferedImage(mat.cols(), mat.rows(), type);
+        mat.get(0, 0, ((DataBufferByte) image.getRaster().getDataBuffer()).getData());
+        return image;
+    }
+}
